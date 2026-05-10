@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="hu">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Szerviz és Karbantartás Nyilvántartó</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <header class="topbar">
+        <div>
+            <p class="eyebrow">Szerviz adminisztráció</p>
+            <h1>Szerviz és Karbantartás Nyilvántartó</h1>
+        </div>
+        <button class="ghost-button" id="refreshButton" type="button">Frissítés</button>
+    </header>
+
+    <main>
+        <section class="stats" aria-label="Fő mutatók">
+            <article>
+                <span id="customerCount">0</span>
+                <p>ügyfél</p>
+            </article>
+            <article>
+                <span id="equipmentCount">0</span>
+                <p>berendezés</p>
+            </article>
+            <article>
+                <span id="appointmentCount">0</span>
+                <p>időpont</p>
+            </article>
+            <article>
+                <span id="todayCount">0</span>
+                <p>mai munka</p>
+            </article>
+        </section>
+
+        <nav class="tabs" aria-label="Modulok">
+            <button class="tab active" data-tab="customers" type="button">Ügyfelek</button>
+            <button class="tab" data-tab="equipment" type="button">Berendezések</button>
+            <button class="tab" data-tab="appointments" type="button">Időpontok</button>
+            <button class="tab" data-tab="maintenance" type="button">Előzmények</button>
+            <button class="tab" data-tab="workorders" type="button">Munkalapok</button>
+            <button class="tab" data-tab="reminders" type="button">Emlékeztetők</button>
+        </nav>
+
+        <section class="panel active" id="customers">
+            <form id="customerForm" class="form-grid">
+                <input name="name" placeholder="Ügyfél neve" required>
+                <input name="phone" placeholder="Telefonszám" required>
+                <input name="email" type="email" placeholder="E-mail" required>
+                <input name="address" placeholder="Cím" required>
+                <textarea name="notes" placeholder="Megjegyzés"></textarea>
+                <button type="submit">Ügyfél mentése</button>
+            </form>
+            <div class="table-wrap">
+                <table>
+                    <thead><tr><th>Név</th><th>Telefon</th><th>E-mail</th><th>Cím</th><th></th></tr></thead>
+                    <tbody id="customerRows"></tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="panel" id="equipment">
+            <form id="equipmentForm" class="form-grid">
+                <select name="customer_id" id="equipmentCustomer" required></select>
+                <select name="type" required>
+                    <option value="kazán">Kazán</option>
+                    <option value="klíma">Klíma</option>
+                    <option value="hőszivattyú">Hőszivattyú</option>
+                    <option value="egyéb">Egyéb</option>
+                </select>
+                <input name="name" placeholder="Berendezés neve" required>
+                <input name="serial_number" placeholder="Gyári szám" required>
+                <label>Telepítés <input name="installation_date" type="date" required></label>
+                <label>Következő karbantartás <input name="next_maintenance_date" type="date" required></label>
+                <button type="submit">Berendezés mentése</button>
+            </form>
+            <div class="cards" id="equipmentRows"></div>
+        </section>
+
+        <section class="panel" id="appointments">
+            <form id="appointmentForm" class="form-grid">
+                <select name="customer_id" id="appointmentCustomer" required></select>
+                <select name="equipment_id" id="appointmentEquipment"></select>
+                <input name="appointment_at" type="datetime-local" required>
+                <input name="service_type" placeholder="Munka típusa" required>
+                <select name="status">
+                    <option value="tervezett">Tervezett</option>
+                    <option value="folyamatban">Folyamatban</option>
+                    <option value="kész">Kész</option>
+                    <option value="lemondva">Lemondva</option>
+                </select>
+                <textarea name="notes" placeholder="Megjegyzés"></textarea>
+                <button type="submit">Időpont mentése</button>
+            </form>
+            <div class="table-wrap">
+                <table>
+                    <thead><tr><th>Időpont</th><th>Ügyfél</th><th>Berendezés</th><th>Típus</th><th>Státusz</th><th></th></tr></thead>
+                    <tbody id="appointmentRows"></tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="panel" id="maintenance">
+            <form id="maintenanceForm" class="form-grid">
+                <select name="equipment_id" id="maintenanceEquipment" required></select>
+                <input name="service_date" type="date" required>
+                <input name="technician" placeholder="Szerelő" required>
+                <textarea name="description" placeholder="Elvégzett munka" required></textarea>
+                <textarea name="parts_used" placeholder="Felhasznált anyagok"></textarea>
+                <input name="cost" type="number" min="0" step="100" placeholder="Költség">
+                <button type="submit">Előzmény mentése</button>
+            </form>
+            <div class="cards" id="maintenanceRows"></div>
+        </section>
+
+        <section class="panel" id="workorders">
+            <form id="workOrderForm" class="form-grid">
+                <select name="appointment_id" id="workOrderAppointment" required></select>
+                <textarea name="work_summary" placeholder="Munkalap leírása" required></textarea>
+                <textarea name="materials" placeholder="Anyagok"></textarea>
+                <input name="customer_signature" placeholder="Átvevő neve">
+                <button type="submit">Munkalap generálása</button>
+            </form>
+            <div class="cards" id="workOrderRows"></div>
+        </section>
+
+        <section class="panel" id="reminders">
+            <div class="notice">A következő 45 napban esedékes éves karbantartások.</div>
+            <div class="cards" id="reminderRows"></div>
+        </section>
+    </main>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="app.js"></script>
+</body>
+</html>
+
