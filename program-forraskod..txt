@@ -1,0 +1,1317 @@
+Szerviz és Karbantartás Nyilvántartó Rendszer
+Program forráskód dokumentum
+A dokumentum a projekt fõ futtatható és fejlesztéshez tartozó forrásfájljait tartalmazza.
+
+1. Tartalom
+api/config.php
+api/Database.php
+api/Request.php
+api/Response.php
+api/index.php
+public/index.html
+public/styles.css
+public/app.js
+database/schema.sql
+tests/api-tests.php
+start-server.bat
+
+api/config.php
+   1  <?php
+   2  
+   3  declare(strict_types=1);
+   4  
+   5  const DB_HOST = '127.0.0.1';
+   6  const DB_NAME = 'szerviz_nyilvantarto';
+   7  const DB_USER = 'root';
+   8  const DB_PASS = '';
+   9  const DB_CHARSET = 'utf8mb4';
+  10  
+
+api/Database.php
+   1  <?php
+   2  
+   3  declare(strict_types=1);
+   4  
+   5  require_once __DIR__ . '/config.php';
+   6  
+   7  final class Database
+   8  {
+   9      private static ?PDO $connection = null;
+  10  
+  11      public static function connection(): PDO
+  12      {
+  13          if (self::$connection === null) {
+  14              $dsn = sprintf(
+  15                  'mysql:host=%s;dbname=%s;charset=%s',
+  16                  DB_HOST,
+  17                  DB_NAME,
+  18                  DB_CHARSET
+  19              );
+  20  
+  21              self::$connection = new PDO($dsn, DB_USER, DB_PASS, [
+  22                  PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+  23                  PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+  24                  PDO::ATTR_EMULATE_PREPARES => false,
+  25              ]);
+  26          }
+  27  
+  28          return self::$connection;
+  29      }
+  30  }
+  31  
+
+api/Request.php
+   1  <?php
+   2  
+   3  declare(strict_types=1);
+   4  
+   5  final class Request
+   6  {
+   7      public static function body(): array
+   8      {
+   9          $rawBody = file_get_contents('php://input');
+  10          if ($rawBody === false || trim($rawBody) === '') {
+  11              return [];
+  12          }
+  13  
+  14          $data = json_decode($rawBody, true);
+  15          return is_array($data) ? $data : [];
+  16      }
+  17  
+  18      public static function requireFields(array $data, array $fields): array
+  19      {
+  20          $missing = [];
+  21          foreach ($fields as $field) {
+  22              if (!isset($data[$field]) || trim((string) $data[$field]) === '') {
+  23                  $missing[] = $field;
+  24              }
+  25          }
+  26  
+  27          return $missing;
+  28      }
+  29  }
+  30  
+
+api/Response.php
+   1  <?php
+   2  
+   3  declare(strict_types=1);
+   4  
+   5  final class Response
+   6  {
+   7      public static function json(mixed $payload, int $statusCode = 200): void
+   8      {
+   9          http_response_code($statusCode);
+  10          header('Content-Type: application/json; charset=utf-8');
+  11          header('Access-Control-Allow-Origin: *');
+  12          header('Access-Control-Allow-Headers: Content-Type');
+  13          header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
+  14          echo json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+  15          exit;
+  16      }
+  17  }
+  18  
+
+api/index.php
+   1  <?php
+   2  
+   3  declare(strict_types=1);
+   4  
+   5  require_once __DIR__ . '/Database.php';
+   6  require_once __DIR__ . '/Request.php';
+   7  require_once __DIR__ . '/Response.php';
+   8  
+   9  if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+  10      Response::json(['ok' => true]);
+  11  }
+  12  
+  13  $method = $_SERVER['REQUEST_METHOD'];
+  14  $path = trim(parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH) ?? '', '/');
+  15  $path = preg_replace('#^.*api/#', '', $path);
+  16  $path = preg_replace('#^index\.php/?#', '', $path);
+  17  $segments = $path === '' ? [] : explode('/', $path);
+  18  $resource = $_GET['resource'] ?? ($segments[0] ?? 'dashboard');
+  19  $idValue = $_GET['id'] ?? ($segments[1] ?? null);
+  20  $id = is_string($idValue) && ctype_digit($idValue) ? (int) $idValue : null;
+  21  $pdo = Database::connection();
+  22  
+  23  try {
+  24      match ($resource) {
+  25          'customers' => handleCustomers($pdo, $method, $id),
+  26          'equipment' => handleEquipment($pdo, $method, $id),
+  27          'maintenance' => handleMaintenance($pdo, $method, $id),
+  28          'appointments' => handleAppointments($pdo, $method, $id),
+  29          'work-orders' => handleWorkOrders($pdo, $method, $id),
+  30          'reminders' => handleReminders($pdo),
+  31          'dashboard' => handleDashboard($pdo),
+  32          default => Response::json(['error' => 'Ismeretlen végpont.'], 404),
+  33      };
+  34  } catch (Throwable $exception) {
+  35      Response::json(['error' => 'Szerverhiba.', 'detail' => $exception->getMessage()], 500);
+  36  }
+  37  
+  38  function handleCustomers(PDO $pdo, string $method, ?int $id): void
+  39  {
+  40      if ($method === 'GET') {
+  41          $stmt = $pdo->query('SELECT * FROM customers ORDER BY name');
+  42          Response::json($stmt->fetchAll());
+  43      }
+  44  
+  45      if ($method === 'POST') {
+  46          $data = Request::body();
+  47          $missing = Request::requireFields($data, ['name', 'phone', 'email', 'address']);
+  48          if ($missing !== []) {
+  49              Response::json(['error' => 'Hiányzó mezõk.', 'fields' => $missing], 422);
+  50          }
+  51  
+  52          $stmt = $pdo->prepare('INSERT INTO customers (name, phone, email, address, notes) VALUES (?, ?, ?, ?, ?)');
+  53          $stmt->execute([
+  54              $data['name'],
+  55              $data['phone'],
+  56              $data['email'],
+  57              $data['address'],
+  58              $data['notes'] ?? '',
+  59          ]);
+  60          Response::json(['id' => (int) $pdo->lastInsertId()], 201);
+  61      }
+  62  
+  63      if ($method === 'PUT' && $id !== null) {
+  64          $data = Request::body();
+  65          $stmt = $pdo->prepare('UPDATE customers SET name = ?, phone = ?, email = ?, address = ?, notes = ? WHERE id = ?');
+  66          $stmt->execute([
+  67              $data['name'] ?? '',
+  68              $data['phone'] ?? '',
+  69              $data['email'] ?? '',
+  70              $data['address'] ?? '',
+  71              $data['notes'] ?? '',
+  72              $id,
+  73          ]);
+  74          Response::json(['updated' => $stmt->rowCount()]);
+  75      }
+  76  
+  77      if ($method === 'DELETE' && $id !== null) {
+  78          $stmt = $pdo->prepare('DELETE FROM customers WHERE id = ?');
+  79          $stmt->execute([$id]);
+  80          Response::json(['deleted' => $stmt->rowCount()]);
+  81      }
+  82  
+  83      Response::json(['error' => 'Nem támogatott mûvelet.'], 405);
+  84  }
+  85  
+  86  function handleEquipment(PDO $pdo, string $method, ?int $id): void
+  87  {
+  88      if ($method === 'GET') {
+  89          $stmt = $pdo->query(
+  90              'SELECT e.*, c.name AS customer_name
+  91               FROM equipment e
+  92               JOIN customers c ON c.id = e.customer_id
+  93               ORDER BY e.next_maintenance_date ASC, e.name'
+  94          );
+  95          Response::json($stmt->fetchAll());
+  96      }
+  97  
+  98      if ($method === 'POST') {
+  99          $data = Request::body();
+ 100          $missing = Request::requireFields($data, ['customer_id', 'type', 'name', 'serial_number', 'installation_date', 'next_maintenance_date']);
+ 101          if ($missing !== []) {
+ 102              Response::json(['error' => 'Hiányzó mezõk.', 'fields' => $missing], 422);
+ 103          }
+ 104  
+ 105          $stmt = $pdo->prepare(
+ 106              'INSERT INTO equipment (customer_id, type, name, serial_number, installation_date, next_maintenance_date)
+ 107               VALUES (?, ?, ?, ?, ?, ?)'
+ 108          );
+ 109          $stmt->execute([
+ 110              $data['customer_id'],
+ 111              $data['type'],
+ 112              $data['name'],
+ 113              $data['serial_number'],
+ 114              $data['installation_date'],
+ 115              $data['next_maintenance_date'],
+ 116          ]);
+ 117          Response::json(['id' => (int) $pdo->lastInsertId()], 201);
+ 118      }
+ 119  
+ 120      if ($method === 'DELETE' && $id !== null) {
+ 121          $stmt = $pdo->prepare('DELETE FROM equipment WHERE id = ?');
+ 122          $stmt->execute([$id]);
+ 123          Response::json(['deleted' => $stmt->rowCount()]);
+ 124      }
+ 125  
+ 126      Response::json(['error' => 'Nem támogatott mûvelet.'], 405);
+ 127  }
+ 128  
+ 129  function handleMaintenance(PDO $pdo, string $method, ?int $id): void
+ 130  {
+ 131      if ($method === 'GET') {
+ 132          $stmt = $pdo->query(
+ 133              'SELECT m.*, e.name AS equipment_name, c.name AS customer_name
+ 134               FROM maintenance_records m
+ 135               JOIN equipment e ON e.id = m.equipment_id
+ 136               JOIN customers c ON c.id = e.customer_id
+ 137               ORDER BY m.service_date DESC'
+ 138          );
+ 139          Response::json($stmt->fetchAll());
+ 140      }
+ 141  
+ 142      if ($method === 'POST') {
+ 143          $data = Request::body();
+ 144          $missing = Request::requireFields($data, ['equipment_id', 'service_date', 'technician', 'description']);
+ 145          if ($missing !== []) {
+ 146              Response::json(['error' => 'Hiányzó mezõk.', 'fields' => $missing], 422);
+ 147          }
+ 148  
+ 149          $stmt = $pdo->prepare(
+ 150              'INSERT INTO maintenance_records (equipment_id, service_date, technician, description, parts_used, cost)
+ 151               VALUES (?, ?, ?, ?, ?, ?)'
+ 152          );
+ 153          $stmt->execute([
+ 154              $data['equipment_id'],
+ 155              $data['service_date'],
+ 156              $data['technician'],
+ 157              $data['description'],
+ 158              $data['parts_used'] ?? '',
+ 159              $data['cost'] ?? 0,
+ 160          ]);
+ 161          Response::json(['id' => (int) $pdo->lastInsertId()], 201);
+ 162      }
+ 163  
+ 164      if ($method === 'DELETE' && $id !== null) {
+ 165          $stmt = $pdo->prepare('DELETE FROM maintenance_records WHERE id = ?');
+ 166          $stmt->execute([$id]);
+ 167          Response::json(['deleted' => $stmt->rowCount()]);
+ 168      }
+ 169  
+ 170      Response::json(['error' => 'Nem támogatott mûvelet.'], 405);
+ 171  }
+ 172  
+ 173  function handleAppointments(PDO $pdo, string $method, ?int $id): void
+ 174  {
+ 175      if ($method === 'GET') {
+ 176          $stmt = $pdo->query(
+ 177              'SELECT a.*, c.name AS customer_name, e.name AS equipment_name
+ 178               FROM appointments a
+ 179               JOIN customers c ON c.id = a.customer_id
+ 180               LEFT JOIN equipment e ON e.id = a.equipment_id
+ 181               ORDER BY a.appointment_at ASC'
+ 182          );
+ 183          Response::json($stmt->fetchAll());
+ 184      }
+ 185  
+ 186      if ($method === 'POST') {
+ 187          $data = Request::body();
+ 188          $missing = Request::requireFields($data, ['customer_id', 'appointment_at', 'service_type']);
+ 189          if ($missing !== []) {
+ 190              Response::json(['error' => 'Hiányzó mezõk.', 'fields' => $missing], 422);
+ 191          }
+ 192  
+ 193          $stmt = $pdo->prepare(
+ 194              'INSERT INTO appointments (customer_id, equipment_id, appointment_at, service_type, status, notes)
+ 195               VALUES (?, ?, ?, ?, ?, ?)'
+ 196          );
+ 197          $stmt->execute([
+ 198              $data['customer_id'],
+ 199              $data['equipment_id'] ?? null,
+ 200              str_replace('T', ' ', $data['appointment_at']),
+ 201              $data['service_type'],
+ 202              $data['status'] ?? 'tervezett',
+ 203              $data['notes'] ?? '',
+ 204          ]);
+ 205          Response::json(['id' => (int) $pdo->lastInsertId()], 201);
+ 206      }
+ 207  
+ 208      if ($method === 'PUT' && $id !== null) {
+ 209          $data = Request::body();
+ 210          $stmt = $pdo->prepare('UPDATE appointments SET status = ? WHERE id = ?');
+ 211          $stmt->execute([$data['status'] ?? 'tervezett', $id]);
+ 212          Response::json(['updated' => $stmt->rowCount()]);
+ 213      }
+ 214  
+ 215      if ($method === 'DELETE' && $id !== null) {
+ 216          $stmt = $pdo->prepare('DELETE FROM appointments WHERE id = ?');
+ 217          $stmt->execute([$id]);
+ 218          Response::json(['deleted' => $stmt->rowCount()]);
+ 219      }
+ 220  
+ 221      Response::json(['error' => 'Nem támogatott mûvelet.'], 405);
+ 222  }
+ 223  
+ 224  function handleWorkOrders(PDO $pdo, string $method, ?int $id): void
+ 225  {
+ 226      if ($method === 'GET') {
+ 227          $stmt = $pdo->query(
+ 228              'SELECT w.*, a.appointment_at, c.name AS customer_name, c.address, e.name AS equipment_name
+ 229               FROM work_orders w
+ 230               JOIN appointments a ON a.id = w.appointment_id
+ 231               JOIN customers c ON c.id = a.customer_id
+ 232               LEFT JOIN equipment e ON e.id = a.equipment_id
+ 233               ORDER BY w.created_at DESC'
+ 234          );
+ 235          Response::json($stmt->fetchAll());
+ 236      }
+ 237  
+ 238      if ($method === 'POST') {
+ 239          $data = Request::body();
+ 240          $missing = Request::requireFields($data, ['appointment_id', 'work_summary']);
+ 241          if ($missing !== []) {
+ 242              Response::json(['error' => 'Hiányzó mezõk.', 'fields' => $missing], 422);
+ 243          }
+ 244  
+ 245          $number = 'ML-' . date('Ymd') . '-' . random_int(1000, 9999);
+ 246          $stmt = $pdo->prepare(
+ 247              'INSERT INTO work_orders (appointment_id, work_order_number, work_summary, materials, customer_signature)
+ 248               VALUES (?, ?, ?, ?, ?)'
+ 249          );
+ 250          $stmt->execute([
+ 251              $data['appointment_id'],
+ 252              $number,
+ 253              $data['work_summary'],
+ 254              $data['materials'] ?? '',
+ 255              $data['customer_signature'] ?? '',
+ 256          ]);
+ 257          Response::json(['id' => (int) $pdo->lastInsertId(), 'work_order_number' => $number], 201);
+ 258      }
+ 259  
+ 260      if ($method === 'DELETE' && $id !== null) {
+ 261          $stmt = $pdo->prepare('DELETE FROM work_orders WHERE id = ?');
+ 262          $stmt->execute([$id]);
+ 263          Response::json(['deleted' => $stmt->rowCount()]);
+ 264      }
+ 265  
+ 266      Response::json(['error' => 'Nem támogatott mûvelet.'], 405);
+ 267  }
+ 268  
+ 269  function handleReminders(PDO $pdo): void
+ 270  {
+ 271      $stmt = $pdo->query(
+ 272          'SELECT e.id, e.type, e.name, e.next_maintenance_date, c.name AS customer_name, c.phone, c.email
+ 273           FROM equipment e
+ 274           JOIN customers c ON c.id = e.customer_id
+ 275           WHERE e.next_maintenance_date <= DATE_ADD(CURDATE(), INTERVAL 45 DAY)
+ 276           ORDER BY e.next_maintenance_date ASC'
+ 277      );
+ 278      Response::json($stmt->fetchAll());
+ 279  }
+ 280  
+ 281  function handleDashboard(PDO $pdo): void
+ 282  {
+ 283      $counts = [];
+ 284      foreach (['customers', 'equipment', 'appointments', 'work_orders'] as $table) {
+ 285          $counts[$table] = (int) $pdo->query("SELECT COUNT(*) FROM {$table}")->fetchColumn();
+ 286      }
+ 287  
+ 288      $today = $pdo->query(
+ 289          "SELECT COUNT(*) FROM appointments WHERE DATE(appointment_at) = CURDATE() AND status <> 'lemondva'"
+ 290      )->fetchColumn();
+ 291  
+ 292      Response::json([
+ 293          'counts' => $counts,
+ 294          'today_appointments' => (int) $today,
+ 295      ]);
+ 296  }
+
+public/index.html
+   1  <!DOCTYPE html>
+   2  <html lang="hu">
+   3  <head>
+   4      <meta charset="UTF-8">
+   5      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+   6      <title>Szerviz és Karbantartás Nyilvántartó</title>
+   7      <link rel="stylesheet" href="styles.css">
+   8  </head>
+   9  <body>
+  10      <header class="topbar">
+  11          <div>
+  12              <p class="eyebrow">Szerviz adminisztráció</p>
+  13              <h1>Szerviz és Karbantartás Nyilvántartó</h1>
+  14          </div>
+  15          <button class="ghost-button" id="refreshButton" type="button">Frissítés</button>
+  16      </header>
+  17  
+  18      <main>
+  19          <section class="stats" aria-label="Fõ mutatók">
+  20              <article>
+  21                  <span id="customerCount">0</span>
+  22                  <p>ügyfél</p>
+  23              </article>
+  24              <article>
+  25                  <span id="equipmentCount">0</span>
+  26                  <p>berendezés</p>
+  27              </article>
+  28              <article>
+  29                  <span id="appointmentCount">0</span>
+  30                  <p>idõpont</p>
+  31              </article>
+  32              <article>
+  33                  <span id="todayCount">0</span>
+  34                  <p>mai munka</p>
+  35              </article>
+  36          </section>
+  37  
+  38          <nav class="tabs" aria-label="Modulok">
+  39              <button class="tab active" data-tab="customers" type="button">Ügyfelek</button>
+  40              <button class="tab" data-tab="equipment" type="button">Berendezések</button>
+  41              <button class="tab" data-tab="appointments" type="button">Idõpontok</button>
+  42              <button class="tab" data-tab="maintenance" type="button">Elõzmények</button>
+  43              <button class="tab" data-tab="workorders" type="button">Munkalapok</button>
+  44              <button class="tab" data-tab="reminders" type="button">Emlékeztetõk</button>
+  45          </nav>
+  46  
+  47          <section class="panel active" id="customers">
+  48              <form id="customerForm" class="form-grid">
+  49                  <input name="name" placeholder="Ügyfél neve" required>
+  50                  <input name="phone" placeholder="Telefonszám" required>
+  51                  <input name="email" type="email" placeholder="E-mail" required>
+  52                  <input name="address" placeholder="Cím" required>
+  53                  <textarea name="notes" placeholder="Megjegyzés"></textarea>
+  54                  <button type="submit">Ügyfél mentése</button>
+  55              </form>
+  56              <div class="table-wrap">
+  57                  <table>
+  58                      <thead><tr><th>Név</th><th>Telefon</th><th>E-mail</th><th>Cím</th><th></th></tr></thead>
+  59                      <tbody id="customerRows"></tbody>
+  60                  </table>
+  61              </div>
+  62          </section>
+  63  
+  64          <section class="panel" id="equipment">
+  65              <form id="equipmentForm" class="form-grid">
+  66                  <select name="customer_id" id="equipmentCustomer" required></select>
+  67                  <select name="type" required>
+  68                      <option value="kazán">Kazán</option>
+  69                      <option value="klíma">Klíma</option>
+  70                      <option value="hõszivattyú">Hõszivattyú</option>
+  71                      <option value="egyéb">Egyéb</option>
+  72                  </select>
+  73                  <input name="name" placeholder="Berendezés neve" required>
+  74                  <input name="serial_number" placeholder="Gyári szám" required>
+  75                  <label>Telepítés <input name="installation_date" type="date" required></label>
+  76                  <label>Következõ karbantartás <input name="next_maintenance_date" type="date" required></label>
+  77                  <button type="submit">Berendezés mentése</button>
+  78              </form>
+  79              <div class="cards" id="equipmentRows"></div>
+  80          </section>
+  81  
+  82          <section class="panel" id="appointments">
+  83              <form id="appointmentForm" class="form-grid">
+  84                  <select name="customer_id" id="appointmentCustomer" required></select>
+  85                  <select name="equipment_id" id="appointmentEquipment"></select>
+  86                  <input name="appointment_at" type="datetime-local" required>
+  87                  <input name="service_type" placeholder="Munka típusa" required>
+  88                  <select name="status">
+  89                      <option value="tervezett">Tervezett</option>
+  90                      <option value="folyamatban">Folyamatban</option>
+  91                      <option value="kész">Kész</option>
+  92                      <option value="lemondva">Lemondva</option>
+  93                  </select>
+  94                  <textarea name="notes" placeholder="Megjegyzés"></textarea>
+  95                  <button type="submit">Idõpont mentése</button>
+  96              </form>
+  97              <div class="table-wrap">
+  98                  <table>
+  99                      <thead><tr><th>Idõpont</th><th>Ügyfél</th><th>Berendezés</th><th>Típus</th><th>Státusz</th><th></th></tr></thead>
+ 100                      <tbody id="appointmentRows"></tbody>
+ 101                  </table>
+ 102              </div>
+ 103          </section>
+ 104  
+ 105          <section class="panel" id="maintenance">
+ 106              <form id="maintenanceForm" class="form-grid">
+ 107                  <select name="equipment_id" id="maintenanceEquipment" required></select>
+ 108                  <input name="service_date" type="date" required>
+ 109                  <input name="technician" placeholder="Szerelõ" required>
+ 110                  <textarea name="description" placeholder="Elvégzett munka" required></textarea>
+ 111                  <textarea name="parts_used" placeholder="Felhasznált anyagok"></textarea>
+ 112                  <input name="cost" type="number" min="0" step="100" placeholder="Költség">
+ 113                  <button type="submit">Elõzmény mentése</button>
+ 114              </form>
+ 115              <div class="cards" id="maintenanceRows"></div>
+ 116          </section>
+ 117  
+ 118          <section class="panel" id="workorders">
+ 119              <form id="workOrderForm" class="form-grid">
+ 120                  <select name="appointment_id" id="workOrderAppointment" required></select>
+ 121                  <textarea name="work_summary" placeholder="Munkalap leírása" required></textarea>
+ 122                  <textarea name="materials" placeholder="Anyagok"></textarea>
+ 123                  <input name="customer_signature" placeholder="Átvevõ neve">
+ 124                  <button type="submit">Munkalap generálása</button>
+ 125              </form>
+ 126              <div class="cards" id="workOrderRows"></div>
+ 127          </section>
+ 128  
+ 129          <section class="panel" id="reminders">
+ 130              <div class="notice">A következõ 45 napban esedékes éves karbantartások.</div>
+ 131              <div class="cards" id="reminderRows"></div>
+ 132          </section>
+ 133      </main>
+ 134  
+ 135      <div class="toast" id="toast" role="status" aria-live="polite"></div>
+ 136      <script src="app.js"></script>
+ 137  </body>
+ 138  </html>
+ 139  
+
+public/styles.css
+   1  :root {
+   2      color-scheme: light;
+   3      --bg: #f6f7f4;
+   4      --surface: #ffffff;
+   5      --text: #1f2933;
+   6      --muted: #667085;
+   7      --line: #d7ddd5;
+   8      --primary: #16646f;
+   9      --primary-dark: #0f4c55;
+  10      --accent: #be6b28;
+  11      --danger: #b42318;
+  12      --shadow: 0 10px 30px rgba(31, 41, 51, 0.08);
+  13  }
+  14  
+  15  * {
+  16      box-sizing: border-box;
+  17  }
+  18  
+  19  body {
+  20      margin: 0;
+  21      font-family: Arial, Helvetica, sans-serif;
+  22      background: var(--bg);
+  23      color: var(--text);
+  24  }
+  25  
+  26  .topbar {
+  27      display: flex;
+  28      align-items: center;
+  29      justify-content: space-between;
+  30      gap: 24px;
+  31      padding: 28px clamp(16px, 4vw, 48px);
+  32      background: #12343b;
+  33      color: #fff;
+  34  }
+  35  
+  36  h1 {
+  37      margin: 0;
+  38      font-size: clamp(1.5rem, 3vw, 2.4rem);
+  39      letter-spacing: 0;
+  40  }
+  41  
+  42  .eyebrow {
+  43      margin: 0 0 8px;
+  44      color: #b7d4d8;
+  45      text-transform: uppercase;
+  46      font-size: 0.78rem;
+  47      font-weight: 700;
+  48  }
+  49  
+  50  main {
+  51      width: min(1180px, calc(100% - 32px));
+  52      margin: 24px auto 56px;
+  53  }
+  54  
+  55  .stats {
+  56      display: grid;
+  57      grid-template-columns: repeat(4, minmax(0, 1fr));
+  58      gap: 12px;
+  59      margin-bottom: 20px;
+  60  }
+  61  
+  62  .stats article,
+  63  .panel,
+  64  .notice,
+  65  .card {
+  66      background: var(--surface);
+  67      border: 1px solid var(--line);
+  68      border-radius: 8px;
+  69      box-shadow: var(--shadow);
+  70  }
+  71  
+  72  .stats article {
+  73      padding: 18px;
+  74  }
+  75  
+  76  .stats span {
+  77      display: block;
+  78      font-size: 2rem;
+  79      font-weight: 800;
+  80      color: var(--primary);
+  81  }
+  82  
+  83  .stats p {
+  84      margin: 6px 0 0;
+  85      color: var(--muted);
+  86  }
+  87  
+  88  .tabs {
+  89      display: flex;
+  90      gap: 8px;
+  91      overflow-x: auto;
+  92      padding-bottom: 8px;
+  93      margin-bottom: 12px;
+  94  }
+  95  
+  96  button,
+  97  input,
+  98  select,
+  99  textarea {
+ 100      font: inherit;
+ 101  }
+ 102  
+ 103  button {
+ 104      border: 0;
+ 105      border-radius: 6px;
+ 106      padding: 11px 15px;
+ 107      min-height: 42px;
+ 108      background: var(--primary);
+ 109      color: #fff;
+ 110      cursor: pointer;
+ 111      font-weight: 700;
+ 112  }
+ 113  
+ 114  button:hover {
+ 115      background: var(--primary-dark);
+ 116  }
+ 117  
+ 118  .ghost-button,
+ 119  .tab {
+ 120      background: #fff;
+ 121      color: var(--primary);
+ 122      border: 1px solid var(--line);
+ 123  }
+ 124  
+ 125  .tab.active {
+ 126      background: var(--primary);
+ 127      color: #fff;
+ 128      border-color: var(--primary);
+ 129  }
+ 130  
+ 131  .danger {
+ 132      background: transparent;
+ 133      color: var(--danger);
+ 134      border: 1px solid #f3c1bc;
+ 135  }
+ 136  
+ 137  .danger:hover {
+ 138      background: #fff1ef;
+ 139  }
+ 140  
+ 141  .panel {
+ 142      display: none;
+ 143      padding: 18px;
+ 144  }
+ 145  
+ 146  .panel.active {
+ 147      display: block;
+ 148  }
+ 149  
+ 150  .form-grid {
+ 151      display: grid;
+ 152      grid-template-columns: repeat(3, minmax(0, 1fr));
+ 153      gap: 12px;
+ 154      margin-bottom: 18px;
+ 155  }
+ 156  
+ 157  input,
+ 158  select,
+ 159  textarea {
+ 160      width: 100%;
+ 161      border: 1px solid var(--line);
+ 162      border-radius: 6px;
+ 163      padding: 11px 12px;
+ 164      background: #fff;
+ 165      color: var(--text);
+ 166  }
+ 167  
+ 168  textarea {
+ 169      min-height: 84px;
+ 170      resize: vertical;
+ 171  }
+ 172  
+ 173  label {
+ 174      display: grid;
+ 175      gap: 4px;
+ 176      color: var(--muted);
+ 177      font-size: 0.88rem;
+ 178  }
+ 179  
+ 180  .table-wrap {
+ 181      overflow-x: auto;
+ 182  }
+ 183  
+ 184  table {
+ 185      width: 100%;
+ 186      border-collapse: collapse;
+ 187      min-width: 760px;
+ 188  }
+ 189  
+ 190  th,
+ 191  td {
+ 192      padding: 12px;
+ 193      border-bottom: 1px solid var(--line);
+ 194      text-align: left;
+ 195      vertical-align: top;
+ 196  }
+ 197  
+ 198  th {
+ 199      color: var(--muted);
+ 200      font-size: 0.82rem;
+ 201      text-transform: uppercase;
+ 202  }
+ 203  
+ 204  .cards {
+ 205      display: grid;
+ 206      grid-template-columns: repeat(3, minmax(0, 1fr));
+ 207      gap: 12px;
+ 208  }
+ 209  
+ 210  .card {
+ 211      padding: 16px;
+ 212  }
+ 213  
+ 214  .card h3 {
+ 215      margin: 0 0 8px;
+ 216      font-size: 1rem;
+ 217  }
+ 218  
+ 219  .card p {
+ 220      margin: 6px 0;
+ 221      color: var(--muted);
+ 222  }
+ 223  
+ 224  .badge {
+ 225      display: inline-flex;
+ 226      align-items: center;
+ 227      border-radius: 999px;
+ 228      padding: 4px 9px;
+ 229      background: #f1f6f6;
+ 230      color: var(--primary);
+ 231      font-size: 0.78rem;
+ 232      font-weight: 700;
+ 233  }
+ 234  
+ 235  .notice {
+ 236      padding: 14px 16px;
+ 237      margin-bottom: 12px;
+ 238      border-left: 4px solid var(--accent);
+ 239  }
+ 240  
+ 241  .toast {
+ 242      position: fixed;
+ 243      right: 18px;
+ 244      bottom: 18px;
+ 245      max-width: min(360px, calc(100% - 36px));
+ 246      padding: 12px 16px;
+ 247      background: #12343b;
+ 248      color: #fff;
+ 249      border-radius: 8px;
+ 250      opacity: 0;
+ 251      transform: translateY(12px);
+ 252      pointer-events: none;
+ 253      transition: 0.2s ease;
+ 254  }
+ 255  
+ 256  .toast.show {
+ 257      opacity: 1;
+ 258      transform: translateY(0);
+ 259  }
+ 260  
+ 261  @media (max-width: 860px) {
+ 262      .topbar {
+ 263          align-items: flex-start;
+ 264          flex-direction: column;
+ 265      }
+ 266  
+ 267      .stats,
+ 268      .cards {
+ 269          grid-template-columns: repeat(2, minmax(0, 1fr));
+ 270      }
+ 271  
+ 272      .form-grid {
+ 273          grid-template-columns: 1fr 1fr;
+ 274      }
+ 275  }
+ 276  
+ 277  @media (max-width: 560px) {
+ 278      main {
+ 279          width: min(100% - 20px, 1180px);
+ 280          margin-top: 14px;
+ 281      }
+ 282  
+ 283      .stats,
+ 284      .cards,
+ 285      .form-grid {
+ 286          grid-template-columns: 1fr;
+ 287      }
+ 288  
+ 289      .panel {
+ 290          padding: 12px;
+ 291      }
+ 292  
+ 293      .tabs {
+ 294          gap: 6px;
+ 295      }
+ 296  
+ 297      .tab {
+ 298          white-space: nowrap;
+ 299      }
+ 300  }
+ 301  
+
+public/app.js
+   1  const apiBase = '../api/index.php';
+   2  
+   3  const state = {
+   4      customers: [],
+   5      equipment: [],
+   6      appointments: [],
+   7      maintenance: [],
+   8      workOrders: [],
+   9      reminders: [],
+  10  };
+  11  
+  12  const toast = document.querySelector('#toast');
+  13  const isOpenedFromFile = window.location.protocol === 'file:';
+  14  
+  15  document.querySelectorAll('.tab').forEach((tab) => {
+  16      tab.addEventListener('click', () => {
+  17          document.querySelectorAll('.tab').forEach((button) => button.classList.remove('active'));
+  18          document.querySelectorAll('.panel').forEach((panel) => panel.classList.remove('active'));
+  19          tab.classList.add('active');
+  20          document.querySelector(`#${tab.dataset.tab}`).classList.add('active');
+  21      });
+  22  });
+  23  
+  24  document.querySelector('#refreshButton').addEventListener('click', loadAll);
+  25  
+  26  bindForm('#customerForm', 'customers');
+  27  bindForm('#equipmentForm', 'equipment');
+  28  bindForm('#appointmentForm', 'appointments');
+  29  bindForm('#maintenanceForm', 'maintenance');
+  30  bindForm('#workOrderForm', 'work-orders');
+  31  
+  32  if (isOpenedFromFile) {
+  33      handleError(new Error('Az alkalmazást webszerverrõl kell megnyitni, nem fájlként. Használd például: http://localhost:8000/public/'));
+  34  } else {
+  35      loadAll().catch(handleError);
+  36  }
+  37  
+  38  function bindForm(selector, endpoint) {
+  39      document.querySelector(selector).addEventListener('submit', async (event) => {
+  40          event.preventDefault();
+  41          const form = event.currentTarget;
+  42          const data = Object.fromEntries(new FormData(form).entries());
+  43          Object.keys(data).forEach((key) => {
+  44              if (data[key] === '') {
+  45                  delete data[key];
+  46              }
+  47          });
+  48  
+  49          try {
+  50              await request(endpoint, {
+  51                  method: 'POST',
+  52                  body: JSON.stringify(data),
+  53              });
+  54  
+  55              form.reset();
+  56              showToast('Mentés sikeres.');
+  57              await loadAll();
+  58          } catch (error) {
+  59              handleError(error);
+  60          }
+  61      });
+  62  }
+  63  
+  64  async function loadAll() {
+  65      const [
+  66          dashboard,
+  67          customers,
+  68          equipment,
+  69          appointments,
+  70          maintenance,
+  71          workOrders,
+  72          reminders,
+  73      ] = await Promise.all([
+  74          request('dashboard'),
+  75          request('customers'),
+  76          request('equipment'),
+  77          request('appointments'),
+  78          request('maintenance'),
+  79          request('work-orders'),
+  80          request('reminders'),
+  81      ]);
+  82  
+  83      state.customers = customers;
+  84      state.equipment = equipment;
+  85      state.appointments = appointments;
+  86      state.maintenance = maintenance;
+  87      state.workOrders = workOrders;
+  88      state.reminders = reminders;
+  89  
+  90      renderDashboard(dashboard);
+  91      renderCustomers();
+  92      renderEquipment();
+  93      renderAppointments();
+  94      renderMaintenance();
+  95      renderWorkOrders();
+  96      renderReminders();
+  97      fillSelects();
+  98  }
+  99  
+ 100  async function request(endpoint, options = {}) {
+ 101      const { resource, id } = parseEndpoint(endpoint);
+ 102      const params = new URLSearchParams({ resource });
+ 103      if (id) {
+ 104          params.set('id', id);
+ 105      }
+ 106  
+ 107      let response;
+ 108      try {
+ 109          response = await fetch(`${apiBase}?${params.toString()}`, {
+ 110              headers: { 'Content-Type': 'application/json' },
+ 111              ...options,
+ 112          });
+ 113      } catch (error) {
+ 114          throw new Error('Nem érhetõ el a PHP API. Indíts webszervert, és http://localhost címen nyisd meg az alkalmazást.');
+ 115      }
+ 116      const data = await response.json().catch(() => ({}));
+ 117      if (!response.ok) {
+ 118          const detail = data.detail ? ` ${data.detail}` : '';
+ 119          throw new Error(`${data.error || 'Sikertelen kérés.'}${detail}`);
+ 120      }
+ 121      return data;
+ 122  }
+ 123  
+ 124  function parseEndpoint(endpoint) {
+ 125      const parts = endpoint.split('/');
+ 126      return {
+ 127          resource: parts[0],
+ 128          id: parts[1] || '',
+ 129      };
+ 130  }
+ 131  
+ 132  function renderDashboard(data) {
+ 133      document.querySelector('#customerCount').textContent = data.counts.customers;
+ 134      document.querySelector('#equipmentCount').textContent = data.counts.equipment;
+ 135      document.querySelector('#appointmentCount').textContent = data.counts.appointments;
+ 136      document.querySelector('#todayCount').textContent = data.today_appointments;
+ 137  }
+ 138  
+ 139  function renderCustomers() {
+ 140      document.querySelector('#customerRows').innerHTML = state.customers.map((customer) => `
+ 141          <tr>
+ 142              <td>${escapeHtml(customer.name)}</td>
+ 143              <td>${escapeHtml(customer.phone)}</td>
+ 144              <td>${escapeHtml(customer.email)}</td>
+ 145              <td>${escapeHtml(customer.address)}</td>
+ 146              <td><button class="danger" onclick="removeItem('customers', ${customer.id})">Törlés</button></td>
+ 147          </tr>
+ 148      `).join('');
+ 149  }
+ 150  
+ 151  function renderEquipment() {
+ 152      document.querySelector('#equipmentRows').innerHTML = state.equipment.map((item) => `
+ 153          <article class="card">
+ 154              <span class="badge">${escapeHtml(item.type)}</span>
+ 155              <h3>${escapeHtml(item.name)}</h3>
+ 156              <p>${escapeHtml(item.customer_name)}</p>
+ 157              <p>Gyári szám: ${escapeHtml(item.serial_number)}</p>
+ 158              <p>Következõ karbantartás: ${formatDate(item.next_maintenance_date)}</p>
+ 159              <button class="danger" onclick="removeItem('equipment', ${item.id})">Törlés</button>
+ 160          </article>
+ 161      `).join('');
+ 162  }
+ 163  
+ 164  function renderAppointments() {
+ 165      document.querySelector('#appointmentRows').innerHTML = state.appointments.map((item) => `
+ 166          <tr>
+ 167              <td>${formatDateTime(item.appointment_at)}</td>
+ 168              <td>${escapeHtml(item.customer_name)}</td>
+ 169              <td>${escapeHtml(item.equipment_name || '-')}</td>
+ 170              <td>${escapeHtml(item.service_type)}</td>
+ 171              <td><span class="badge">${escapeHtml(item.status)}</span></td>
+ 172              <td><button class="danger" onclick="removeItem('appointments', ${item.id})">Törlés</button></td>
+ 173          </tr>
+ 174      `).join('');
+ 175  }
+ 176  
+ 177  function renderMaintenance() {
+ 178      document.querySelector('#maintenanceRows').innerHTML = state.maintenance.map((item) => `
+ 179          <article class="card">
+ 180              <h3>${escapeHtml(item.equipment_name)}</h3>
+ 181              <p>${escapeHtml(item.customer_name)} - ${formatDate(item.service_date)}</p>
+ 182              <p>${escapeHtml(item.description)}</p>
+ 183              <p>Szerelõ: ${escapeHtml(item.technician)}</p>
+ 184              <p>Költség: ${Number(item.cost).toLocaleString('hu-HU')} Ft</p>
+ 185              <button class="danger" onclick="removeItem('maintenance', ${item.id})">Törlés</button>
+ 186          </article>
+ 187      `).join('');
+ 188  }
+ 189  
+ 190  function renderWorkOrders() {
+ 191      document.querySelector('#workOrderRows').innerHTML = state.workOrders.map((item) => `
+ 192          <article class="card">
+ 193              <span class="badge">${escapeHtml(item.work_order_number)}</span>
+ 194              <h3>${escapeHtml(item.customer_name)}</h3>
+ 195              <p>${formatDateTime(item.appointment_at)} - ${escapeHtml(item.equipment_name || 'általános munka')}</p>
+ 196              <p>${escapeHtml(item.work_summary)}</p>
+ 197              <p>Átvevõ: ${escapeHtml(item.customer_signature || '-')}</p>
+ 198              <button type="button" onclick="printWorkOrder(${item.id})">Nyomtatás</button>
+ 199          </article>
+ 200      `).join('');
+ 201  }
+ 202  
+ 203  function renderReminders() {
+ 204      document.querySelector('#reminderRows').innerHTML = state.reminders.map((item) => `
+ 205          <article class="card">
+ 206              <span class="badge">${formatDate(item.next_maintenance_date)}</span>
+ 207              <h3>${escapeHtml(item.name)}</h3>
+ 208              <p>${escapeHtml(item.customer_name)} - ${escapeHtml(item.type)}</p>
+ 209              <p>${escapeHtml(item.phone)} | ${escapeHtml(item.email)}</p>
+ 210          </article>
+ 211      `).join('');
+ 212  }
+ 213  
+ 214  function fillSelects() {
+ 215      fillOptions('#equipmentCustomer', state.customers, 'Válassz ügyfelet');
+ 216      fillOptions('#appointmentCustomer', state.customers, 'Válassz ügyfelet');
+ 217      fillOptions('#appointmentEquipment', state.equipment, 'Nincs berendezés', true);
+ 218      fillOptions('#maintenanceEquipment', state.equipment, 'Válassz berendezést');
+ 219      fillOptions('#workOrderAppointment', state.appointments, 'Válassz idõpontot', false, (item) => {
+ 220          return `${item.customer_name} - ${formatDateTime(item.appointment_at)}`;
+ 221      });
+ 222  }
+ 223  
+ 224  function fillOptions(selector, items, placeholder, allowEmpty = false, labelFactory = null) {
+ 225      const select = document.querySelector(selector);
+ 226      const options = items.map((item) => {
+ 227          const label = labelFactory ? labelFactory(item) : (item.name || item.customer_name);
+ 228          return `<option value="${item.id}">${escapeHtml(label)}</option>`;
+ 229      });
+ 230      select.innerHTML = `<option value="">${placeholder}</option>${options.join('')}`;
+ 231      select.required = !allowEmpty;
+ 232  }
+ 233  
+ 234  async function removeItem(endpoint, id) {
+ 235      if (!confirm('Biztosan törlöd a bejegyzést?')) {
+ 236          return;
+ 237      }
+ 238      try {
+ 239          await request(`${endpoint}/${id}`, { method: 'DELETE' });
+ 240          showToast('Törlés kész.');
+ 241          await loadAll();
+ 242      } catch (error) {
+ 243          handleError(error);
+ 244      }
+ 245  }
+ 246  
+ 247  function printWorkOrder(id) {
+ 248      const order = state.workOrders.find((item) => Number(item.id) === Number(id));
+ 249      if (!order) {
+ 250          return;
+ 251      }
+ 252  
+ 253      const html = `
+ 254          <h1>Munkalap: ${escapeHtml(order.work_order_number)}</h1>
+ 255          <p><strong>Ügyfél:</strong> ${escapeHtml(order.customer_name)}</p>
+ 256          <p><strong>Cím:</strong> ${escapeHtml(order.address)}</p>
+ 257          <p><strong>Idõpont:</strong> ${formatDateTime(order.appointment_at)}</p>
+ 258          <p><strong>Berendezés:</strong> ${escapeHtml(order.equipment_name || '-')}</p>
+ 259          <p><strong>Munka:</strong> ${escapeHtml(order.work_summary)}</p>
+ 260          <p><strong>Anyagok:</strong> ${escapeHtml(order.materials || '-')}</p>
+ 261          <p><strong>Átvevõ:</strong> ${escapeHtml(order.customer_signature || '-')}</p>
+ 262      `;
+ 263      const printWindow = window.open('', '_blank');
+ 264      printWindow.document.write(`<html><head><title>Munkalap</title></head><body>${html}</body></html>`);
+ 265      printWindow.document.close();
+ 266      printWindow.print();
+ 267  }
+ 268  
+ 269  function showToast(message) {
+ 270      toast.textContent = message;
+ 271      toast.classList.add('show');
+ 272      setTimeout(() => toast.classList.remove('show'), 2400);
+ 273  }
+ 274  
+ 275  function handleError(error) {
+ 276      console.error(error);
+ 277      showToast(error.message || 'Hiba történt a mûvelet közben.');
+ 278  }
+ 279  
+ 280  function formatDate(value) {
+ 281      return new Intl.DateTimeFormat('hu-HU').format(new Date(value));
+ 282  }
+ 283  
+ 284  function formatDateTime(value) {
+ 285      return new Intl.DateTimeFormat('hu-HU', {
+ 286          dateStyle: 'medium',
+ 287          timeStyle: 'short',
+ 288      }).format(new Date(value.replace(' ', 'T')));
+ 289  }
+ 290  
+ 291  function escapeHtml(value) {
+ 292      return String(value ?? '').replace(/[&<>"']/g, (character) => ({
+ 293          '&': '&amp;',
+ 294          '<': '&lt;',
+ 295          '>': '&gt;',
+ 296          '"': '&quot;',
+ 297          "'": '&#039;',
+ 298      }[character]));
+ 299  }
+
+database/schema.sql
+   1  CREATE DATABASE IF NOT EXISTS szerviz_nyilvantarto
+   2      CHARACTER SET utf8mb4
+   3      COLLATE utf8mb4_hungarian_ci;
+   4  
+   5  USE szerviz_nyilvantarto;
+   6  
+   7  DROP TABLE IF EXISTS work_orders;
+   8  DROP TABLE IF EXISTS maintenance_records;
+   9  DROP TABLE IF EXISTS appointments;
+  10  DROP TABLE IF EXISTS equipment;
+  11  DROP TABLE IF EXISTS customers;
+  12  
+  13  CREATE TABLE customers (
+  14      id INT AUTO_INCREMENT PRIMARY KEY,
+  15      name VARCHAR(120) NOT NULL,
+  16      phone VARCHAR(40) NOT NULL,
+  17      email VARCHAR(120) NOT NULL,
+  18      address VARCHAR(180) NOT NULL,
+  19      notes TEXT,
+  20      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+  21  ) ENGINE=InnoDB;
+  22  
+  23  CREATE TABLE equipment (
+  24      id INT AUTO_INCREMENT PRIMARY KEY,
+  25      customer_id INT NOT NULL,
+  26      type ENUM('kazán', 'klíma', 'hõszivattyú', 'egyéb') NOT NULL,
+  27      name VARCHAR(120) NOT NULL,
+  28      serial_number VARCHAR(80) NOT NULL,
+  29      installation_date DATE NOT NULL,
+  30      next_maintenance_date DATE NOT NULL,
+  31      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  32      CONSTRAINT fk_equipment_customer
+  33          FOREIGN KEY (customer_id) REFERENCES customers(id)
+  34          ON DELETE CASCADE
+  35  ) ENGINE=InnoDB;
+  36  
+  37  CREATE TABLE appointments (
+  38      id INT AUTO_INCREMENT PRIMARY KEY,
+  39      customer_id INT NOT NULL,
+  40      equipment_id INT NULL,
+  41      appointment_at DATETIME NOT NULL,
+  42      service_type VARCHAR(100) NOT NULL,
+  43      status ENUM('tervezett', 'folyamatban', 'kész', 'lemondva') NOT NULL DEFAULT 'tervezett',
+  44      notes TEXT,
+  45      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  46      CONSTRAINT fk_appointment_customer
+  47          FOREIGN KEY (customer_id) REFERENCES customers(id)
+  48          ON DELETE CASCADE,
+  49      CONSTRAINT fk_appointment_equipment
+  50          FOREIGN KEY (equipment_id) REFERENCES equipment(id)
+  51          ON DELETE SET NULL
+  52  ) ENGINE=InnoDB;
+  53  
+  54  CREATE TABLE maintenance_records (
+  55      id INT AUTO_INCREMENT PRIMARY KEY,
+  56      equipment_id INT NOT NULL,
+  57      service_date DATE NOT NULL,
+  58      technician VARCHAR(100) NOT NULL,
+  59      description TEXT NOT NULL,
+  60      parts_used TEXT,
+  61      cost DECIMAL(10,2) NOT NULL DEFAULT 0,
+  62      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  63      CONSTRAINT fk_maintenance_equipment
+  64          FOREIGN KEY (equipment_id) REFERENCES equipment(id)
+  65          ON DELETE CASCADE
+  66  ) ENGINE=InnoDB;
+  67  
+  68  CREATE TABLE work_orders (
+  69      id INT AUTO_INCREMENT PRIMARY KEY,
+  70      appointment_id INT NOT NULL,
+  71      work_order_number VARCHAR(40) NOT NULL UNIQUE,
+  72      work_summary TEXT NOT NULL,
+  73      materials TEXT,
+  74      customer_signature VARCHAR(120),
+  75      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  76      CONSTRAINT fk_work_order_appointment
+  77          FOREIGN KEY (appointment_id) REFERENCES appointments(id)
+  78          ON DELETE CASCADE
+  79  ) ENGINE=InnoDB;
+  80  
+  81  CREATE INDEX idx_equipment_next_maintenance ON equipment(next_maintenance_date);
+  82  CREATE INDEX idx_appointments_time ON appointments(appointment_at);
+  83  
+
+tests/api-tests.php
+   1  <?php
+   2  
+   3  declare(strict_types=1);
+   4  
+   5  $baseUrl = $argv[1] ?? 'http://localhost:8000/api/index.php';
+   6  $endpoints = [
+   7      'dashboard',
+   8      'customers',
+   9      'equipment',
+  10      'appointments',
+  11      'maintenance',
+  12      'work-orders',
+  13      'reminders',
+  14  ];
+  15  
+  16  $failures = [];
+  17  
+  18  foreach ($endpoints as $endpoint) {
+  19      $url = rtrim($baseUrl, '/') . '?resource=' . urlencode($endpoint);
+  20      $http_response_header = [];
+  21      $context = stream_context_create([
+  22          'http' => [
+  23              'method' => 'GET',
+  24              'timeout' => 5,
+  25              'ignore_errors' => true,
+  26          ],
+  27      ]);
+  28  
+  29      $body = @file_get_contents($url, false, $context);
+  30      $statusLine = $http_response_header[0] ?? '';
+  31      $isOk = str_contains($statusLine, '200');
+  32      $isJson = is_string($body) && json_decode($body, true) !== null;
+  33  
+  34      if (!$isOk || !$isJson) {
+  35          $failures[] = sprintf('%s sikertelen. HTTP: %s', $endpoint, $statusLine ?: 'nincs válasz');
+  36          continue;
+  37      }
+  38  
+  39      echo sprintf("[OK] %s\n", $endpoint);
+  40  }
+  41  
+  42  if ($failures !== []) {
+  43      echo "\nHibák:\n";
+  44      foreach ($failures as $failure) {
+  45          echo '- ' . $failure . "\n";
+  46      }
+  47      exit(1);
+  48  }
+  49  
+  50  echo "\nMinden API smoke teszt sikeres.\n";
+
+start-server.bat
+   1  @echo off
+   2  setlocal
+   3  
+   4  cd /d "%~dp0"
+   5  
+   6  where php >nul 2>nul
+   7  if %errorlevel% equ 0 (
+   8      php -S localhost:8000
+   9      exit /b
+  10  )
+  11  
+  12  if exist "C:\xampp\php\php.exe" (
+  13      "C:\xampp\php\php.exe" -S localhost:8000
+  14      exit /b
+  15  )
+  16  
+  17  echo Nem talalhato PHP futtato.
+  18  echo Ha XAMPP-ot hasznalsz, inditsd el az Apache es MySQL szolgaltatast,
+  19  echo majd masold a projektet a C:\xampp\htdocs mappaba.
+  20  pause
+  21  
+
